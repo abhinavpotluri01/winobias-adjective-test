@@ -6,6 +6,18 @@
 import prompt
 import completion
 import data
+import time
+import json
+import parallel
+import asyncio  # for running API calls concurrently
+import logging  # for logging rate limit warnings and other messages
+import os  # for reading API key
+import re  # for matching endpoint from request URL
+import tiktoken  # for counting tokens
+from dataclasses import (
+    dataclass,
+    field,
+)  # for storing API inputs, outputs, and metadata
 
 
 adjList = ["pro_base", "anti_base",
@@ -25,8 +37,8 @@ adjList = ["pro_base", "anti_base",
         "pro_pract-pleas", "anti_pract-pleas",
         "pro_tough-under", "anti_tough-under"
     ]
-prompts = [None] * 32
-completions = [None] * 32
+prompts_files = [None] * 32
+completions_files = [None] * 32
 headings = [None] * 32
 
 
@@ -34,7 +46,7 @@ def run(trialNum):
     print("Running...")
     
     readAdj(trialNum)
-    runCompletions()
+    runParallelCompletions()
     runStats(trialNum)
     runHeatMap(trialNum)
     
@@ -42,35 +54,109 @@ def run(trialNum):
     
     
 def readAdj(trialNum):
+    start = time.time()
+    numRows = 395
     for i in range( len(adjList) ):
-        prompts[i] = "prompts\\promp_type1_" + adjList[i] + ".txt.test"
-        completions[i] = "completions\\trial" + str(trialNum) + "\\compl_tri" + str(trialNum) + "_type1_" + adjList[i] + ".txt.test"
-        
+        prompts_files[i] = "prompts\\promp_type1_" + adjList[i] + ".txt.test"
+        completions_files[i] = "completions\\trial" + str(trialNum) + "\\compl_tri" + str(trialNum) + "_type1_" + adjList[i] + ".txt.test"
+
         tokens = adjList[i].split("_")
         headings[i] = "I"
         for j in range( len(tokens) ):
             headings[i] += " " + tokens[j].title() # title() is used over capitalize() so that the letter after the hyphen is also uppercase
     
+    end = time.time()
+    print("readAdj time: ", end - start)
+    
 
 def runPrompts():
-    # prompt.makeFile("[Read From]", "[Write To]", "[Adj 1]", "[Adj 2]", 395)
     print()
-
 
 def runCompletions():
     modelName = "gpt-3.5-turbo"
     numRows = 395
         
-    for i in range( len(prompts) ):
-        completion.getCompletionsOf(prompts[i], completions[i], modelName, headings[i], numRows)
+    for i in range( len(prompts_files) ):
+        start = time.time()
+        completion.getCompletionsOf(prompts_files[i], completions_files[i], modelName, headings[i], numRows)
         printSeparator("Completed File " + str(i + 1))
+        end = time.time()
+        print("in runCompletions iteration: ", i, " time: ", end - start)
 
+def runParallelCompletions():
+    numRows = 395
+    
+    for i in range( len(prompts_files) ):
+        start = time.time()
+        printSeparator(headings[i])
+        actualPrompt = [None] * numRows
+        messages = [None] * numRows
+        completions = [None] * numRows
+        responseMessages = [None] * numRows
+        with open(prompts_files[i], "r") as file:
+            for j in range(numRows):
+                actualPrompt[j] = file.readline().strip()
+                messages[j] = {"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": actualPrompt[j]}]} #, "input": str(j)}
+        with open("input.json1", "w") as file:
+            for j in range(numRows):
+                file.write(json.dumps(messages[j]) + "\n")
+            printSeparator("Completed File " + str(i + 1))
+        
+        asyncio.run(
+            parallel.process_api_requests_from_file(
+                requests_filepath="input.json1", #"C:/Users/abhin/Prompt OpenAI/winobias-adjective-test/input.json1", #args.requests_filepath,
+                save_filepath="results.json1", #"C:/Users/abhin/Prompt OpenAI/winobias-adjective-test/results.json1", #args.save_filepath,
+                request_url="https://api.openai.com/v1/chat/completions", #args.request_url,
+                api_key=os.getenv("API_KEY"), #args.api_key,
+                max_requests_per_minute=float(3_000 * 0.5),
+                max_tokens_per_minute=float(250_000 * 0.5),
+                token_encoding_name="cl100k_base",
+                max_attempts=int(6),
+                logging_level=int(logging.INFO),
+            )
+        )
+        #process results.json1 and write to completions[i] with headings[i]
+        # Extract entire message content
+        with open("results.json1", "r") as file:
+            for j in range(numRows):
+                #print(file.readline().strip())
+                line = json.loads(file.readline().strip())
+                responseMessages[j] = line[1]['choices'][0]['message']['content']
+        
+                # Take only the first word of the response
+                tokens = responseMessages[j].split()
+                if tokens[0] == "the" and len(tokens) == 2: # Make an exception for 'the _____'
+                    extraction = tokens[1]
+                else:
+                    extraction = tokens[0]
+            
+                # Remove whitespace, punctuation, and capitalization
+                extraction = extraction.strip()
+                extraction = extraction.strip(".")
+                extraction = extraction.lower()
+        
+                completions[j] = extraction   
+                #print("completions[j]: ", completions[j])     
+        print("Completed request " + str(i + 1))
+
+        # Output completions to csv
+        with open(completions_files[i], "w") as file:
+            file.write(headings[i] + "\n")
+            for line in completions:
+                file.write(line + "\n")
+        #exit()
+        end = time.time()
+        print("Time taken for file[",i,"]: ", end - start)
+        time.sleep(25)
 
 def runStats(trialNum):
-    for i in range( len(completions) ):
-        completions[i] = completions[i]
+    for i in range( len(completions_files) ):
+        start = time.time()
+        completions_files[i] = completions_files[i]
+        end = time.time()
+        print("in runStats iteration: ", i, " time: ", end - start)
     
-    data.makeStatsFile("answers\\coranswers.txt.test", "answers\\incanswers.txt.test", completions, "output\\output_data_tri" + str(trialNum) + ".csv", 395)
+    data.makeStatsFile("answers\\coranswers.txt.test", "answers\\incanswers.txt.test", completions_files, "output\\output_data_tri" + str(trialNum) + ".csv", 395)
     
  
 def runHeatMap(trialNum):
@@ -87,3 +173,6 @@ def printSeparator(message):
     print("------------------------------")
     print("******************************")
     print("\n\n")
+
+if __name__ == "__main__":
+    run(1)
